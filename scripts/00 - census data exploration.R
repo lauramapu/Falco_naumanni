@@ -1,0 +1,32 @@
+# presence points and environmental variables
+
+library(readxl)
+library(sf)
+library(mapview)
+
+# read census data
+census <- read_xls("data/primilla_Nacional_2016-2018_V5.xls", sheet = 'CENSO NACIONAL')
+View(census)
+
+# total individuals is called Total_CS
+presence <- subset(census, census$Total_CS > 0)
+absence <- subset(census, census$Total_CS == 0)
+
+# reproyect to 4326 from corresponding huso (29, 30 and 31)
+to_point <- function(x) {
+  points29 <- st_transform(st_as_sf(subset(x, x$Huso == 29), coords = c('Coord.X', 'Coord.Y'), crs = 25829), crs = 4326)
+  points30 <- st_transform(st_as_sf(subset(x, x$Huso == 30), coords = c('Coord.X', 'Coord.Y'), crs = 25830), crs = 4326)
+  points31 <- st_transform(st_as_sf(subset(x, x$Huso == 31), coords = c('Coord.X', 'Coord.Y'), crs = 25831), crs = 4326)
+  puntos <- rbind(points29, points30, points31)
+  return(puntos)
+}
+
+presence_points <- to_point(presence)
+mapview(presence_points)
+
+absence_points <- to_point(absence)
+mapview(absence_points)
+# same areas overall, so maybe we'll need to use pseudoabsences
+
+unique(presence$Ano_CS) # years 2016, 2017 and 2018
+
