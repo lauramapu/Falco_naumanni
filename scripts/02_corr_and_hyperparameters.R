@@ -34,7 +34,6 @@ dataset <- read.csv2("data/modeling_data.csv")
 # define ranges
 set.seed(123)
 grid <- expand.grid(mtry = 2:ncol(dataset[,5:44])/2, # variables in each tree
-                    ntree = seq(1000, 10000, by = 1000), # trees in each forest
                     nodesize = seq(10, nrow(dataset[dataset$Total>0,]), by = 10)) # minimum size of terminal nodes
 write.csv2(grid, "data/grid_hyperpar.csv", row.names=F)
 # grid <- read.csv2("data/grid_hyperpar.csv")
@@ -64,7 +63,7 @@ metrics <- foreach(i = 1:nrow(grid),
                                   data = train,
                                   sampsize = prNum,
                                   mtry = grid[i,1],
-                                  ntree = grid[i,2],
+                                  ntree = 1000,
                                   nodesize = grid[i,3])
             
             # generate training predictions (only select probs of presence)
@@ -90,14 +89,14 @@ metrics <- foreach(i = 1:nrow(grid),
             # 'Sens_train', 'F1_train','B.Accuracy_train','TSS_train','AUC_train',
             # 'Sens_test', 'F1_test', 'B.Accuracy_test','TSS_test','AUC_test')
             
-            metrics <- c(i, j, grid[i,1], grid[i,2], grid[i,3], mae_train, mse_train, rmse_train, mae_test, mse_test, rmse_test)
+            metrics <- c(i, j, grid[i,1], grid[i,2], mae_train, mse_train, rmse_train, mae_test, mse_test, rmse_test)
             return(metrics)
           }
 toc() 
 
 # assign col names
 metrics <- as.data.frame(metrics)
-column_names <- c('combination', 'fold', 'mtry', 'ntree', 'nodesize', 'MAE_train', 'MSE_train', 'RMSE_train',
+column_names <- c('combination', 'fold', 'mtry', 'nodesize', 'MAE_train', 'MSE_train', 'RMSE_train',
                   'MAE_test', 'MSE_test', 'RMSE_test')
 colnames(metrics) <- column_names
 write.csv2(metrics, "results/hyperparameters.csv", row.names = F)
