@@ -41,12 +41,11 @@ write.csv2(grid, "data/grid_hyperpar.csv", row.names=F)
 # run models iterating through each hyperpar combination
 tic("random hyperparameters")
 metrics <- foreach(i = 1:nrow(grid),
-                   .packages=c("ranger", "sf", "dplyr", "caret"),
+                   .packages=c("ranger", "dplyr", "caret"),
                    .combine='rbind') %:% # iterations through hyperpar combinations
   
-  foreach(j = 1:5,
-          .combine='rbind',
-          verbose=T) %dopar% { # iterations through random cv folds (5)
+           foreach(j = 1:5,
+           .combine='rbind') %dopar% { # iterations through random cv folds (5)
             
             # set unique seed for each fold
             set.seed(j**2)
@@ -92,20 +91,20 @@ metrics <- foreach(i = 1:nrow(grid),
             train$pred <- preds[[1]]
             
             # calculate metrics (caret)
-            mae_train <- MAE(preds, train$Total)
-            mse_train <- mean((preds - train$Total)^2)
-            rmse_train <- RMSE(preds, train$Total)
-            Rsq_train <- 1 - (sum((train$Total - preds)^2) / sum((train$Total - mean(train$Total))^2))
+            mae_train <- MAE(preds[[1]], train$Total)
+            mse_train <- mean((preds[[1]] - train$Total)^2)
+            rmse_train <- RMSE(preds[[1]], train$Total)
+            Rsq_train <- 1 - (sum((train$Total - preds[[1]])^2) / sum((train$Total - mean(train$Total))^2))
             
             # generate testing predictions and binaries from maxSSS
             preds <- predict(model, data=test)
             test$pred <- preds[[1]]
             
             # calculate metrics (caret)
-            mae_test <- MAE(preds, test$Total)
-            mse_test <- mean((preds - test$Total)^2)
-            rmse_test <- RMSE(preds, test$Total)
-            Rsq_test <- 1 - (sum((test$Total - preds)^2) / sum((test$Total - mean(test$Total))^2))
+            mae_test <- MAE(preds[[1]], test$Total)
+            mse_test <- mean((preds[[1]] - test$Total)^2)
+            rmse_test <- RMSE(preds[[1]], test$Total)
+            Rsq_test <- 1 - (sum((test$Total - preds[[1]])^2) / sum((test$Total - mean(test$Total))^2))
             
             # store all the relevant values in the metrics dataframe
             # column_names <- c('mtry', 'ntree', 'nodesize','thr_value',
