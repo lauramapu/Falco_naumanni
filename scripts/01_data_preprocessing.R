@@ -1,21 +1,11 @@
 # presence points and environmental variables
 
-library(readxl)
-library(sf)
-library(mapview)
-library(mapSpain)
-library(MazamaSpatialUtils)
-library(raster)
-library(dplyr)
-library(randomForest)
-library(units)
-library(terra)
-library(corrplot)
-library(car) # vif
+rm(list=ls())
+source('scripts/utils.R')
 
 # read census data
 census <- read_xls("data/primilla_Nacional_2016-2018_V5.xls", sheet = 'CENSO NACIONAL')
-View(census)
+# View(census)
 
 # filter presences
 presence <- census %>%
@@ -34,31 +24,11 @@ to_point <- function(x) {
 }
 
 raw_presence_points <- to_point(presence)
-mapview(raw_presence_points, zcol='Total_CS')
-
-# random pseudoabsence generation
-# spanish provinces borders
-provinces <- mapSpain::esp_get_prov()
-# excluding Canarias and Baleares
-provinces <- provinces[!provinces$iso2.prov.name.es %in% c("Las Palmas", "Santa Cruz de Tenerife", "Baleares"), ]
-# dissolve
-provinces$campo <- 1
-mask_spain <- dissolve(provinces, field='campo')
-
-set.seed(1)
-pseudoabsences <- as.data.frame(st_sample(mask_spain, size = 1000, type = "random"))
-
-# convert to single spatial objects to later extract raster values
-PA_to_points <- function(original_points) {
-  coordinates_obj <- as.data.frame(st_coordinates(original_points$geometry)) 
-  points_object <- st_as_sf(coordinates_obj, coords = c("X", "Y"), crs = 4326)
-  return(points_object)
-}
-pseudoabsences_sf <- PA_to_points(pseudoabsences)
 
 unique(presence$Ano_CS) # years 2016, 2017 and 2018
 
-# allpoints <- rbind(presence_points, absence_points) # true absences
+# spanish provinces borders
+spain <- getpeninsularspain()
 
 # handle observations
 
@@ -66,31 +36,38 @@ presence_points <- raw_presence_points %>%
   mutate(Ano_CS = ifelse(is.na(Ano_CS), 2016, Ano_CS)) %>% # all year NA belong to 2016 (see census documentation)
   mutate(Parejas_CE = ifelse(is.na(Parejas_CE), 0, Parejas_CE)) %>% # all NA in Parejas is 0
   mutate(Total_CS = ifelse(is.na(Total_CS), 0, Total_CS)) %>% # all NA in Total is 0
-  mutate(Total = ifelse(2 * Parejas_CE >= Total_CS, 2 * Parejas_CE, Total_CS)) %>% # if Parejas*2 >= Total then parejas, else Total
-  select(Total, Ano_CS, geometry) %>% 
+  mutate(Total = ifelse(2 * Parejas_CE >= Total_CS, 2 * Parejas_CE, Total_CS)) %>% # if Parejas*2 >= Total then parejas*2, else Total
+  dplyr::select(Total, Ano_CS, geometry) %>% 
   cbind(st_coordinates(raw_presence_points))
-
-# same format as presence
-set.seed(21)
-pseudoabsences_sf <- pseudoabsences_sf %>%
-  mutate(Total = 0, Ano_CS = sample(presence_points$Ano_CS, n(), replace = TRUE)) %>%
-  cbind(st_coordinates(pseudoabsences_sf))
-
-allpoints <- rbind(presence_points, pseudoabsences_sf) 
 
 # absence_points <- to_point(absence)
 # mapview(absence_points)
-# same areas overall
+# same areas overall so we're not including them
 
-# distances between colonies (presence points)
-# we need a function to first calculate nearest point and then extract distance
-
-(nearest = st_nearest_feature(presence_points))
-(dist = st_distance(presence_points, presence_points[nearest,], by_element=TRUE))
-presence_points$min_dist <- drop_units(dist) # meters
-
-zero_distance <- presence_points[presence_points$min_dist<1,]
-mapview(zero_distance)
+# join obs per raster cells (sum up values per 1x1km cells)
+# load base raster
+base <- crop(raster('spatial_data/climate/present/CHELSA_tas_01_2016_V.2.1.tif'),
+             extent(spain))
+# assign unique value to each pixel
+base[] <- 1:ncell(base)
+# raster::extract centroid coordinates
+basedf <- base %>%
+  as.data.frame(xy=T)
+# rename to later join
+basedf <- basedf %>%
+  rename(ncell = colnames(basedf)[3])
+# raster::extract values to points
+presence_points$ncell <- raster::extract(base, presence_points)
+# group by, summarize, and join with centroids coordinates
+modeling_points <- presence_points %>%
+  st_drop_geometry() %>%
+  group_by(ncell) %>%
+  summarize(Total = sum(Total), Ano_CS = modal(Ano_CS)) %>%
+  left_join(basedf, by = 'ncell') %>%
+  st_as_sf(coords=c('x','y'), crs=4326)
+# add coords
+modeling_points <- cbind(modeling_points, st_coordinates(modeling_points))
+modeling_points <- modeling_points[,-1]
 
 # environmental variables
 
@@ -104,7 +81,7 @@ processing <- function(mi_pattern, mi_calc){
                              full.names = TRUE)
   print(listadefiles)
   stackdefiles <- stack(listadefiles)
-  maskk <- st_transform(mask_spain, crs=crs(stackdefiles))
+  maskk <- st_transform(spain, crs=crs(stackdefiles))
   cortado <- raster::crop(stackdefiles, extent(maskk))
   masqueado <- raster::mask(cortado, maskk)
   raster_final <- calc(masqueado, mi_calc)
@@ -146,7 +123,7 @@ processing <- function(mi_pattern, mi_calc){
                              full.names = TRUE)
   print(listadefiles)
   stackdefiles <- stack(listadefiles)
-  maskk <- st_transform(mask_spain, crs=crs(stackdefiles))
+  maskk <- st_transform(spain, crs=crs(stackdefiles))
   cortado <- raster::crop(stackdefiles, extent(maskk))
   masqueado <- raster::mask(cortado, maskk)
   raster_final <- calc(masqueado, mi_calc)
@@ -298,7 +275,7 @@ manual_zscore(prseas_2016, prseas_2017, prseas_2018, prseas_1, prseas_5)
 
 # crop+mask function for all variables
 mask_raster <- function(raster_layer) {
-  maskk <- st_transform(mask_spain, st_crs(raster_layer))
+  maskk <- st_transform(spain, st_crs(raster_layer))
   cropped <- raster::crop(raster_layer, extent(maskk))
   masked <- raster::mask(cropped, maskk)
   return(masked)
@@ -321,10 +298,10 @@ topo_variables <- lapply(topo_variables, scale)
 ### LAND USES
 
 raw_landuses <- raster("spatial_data/land_uses/EU_landSystem.tif")
-# extract unique values from corine
+# raster::extract unique values from corine
 unique_values <- unique(na.omit(values(raw_landuses)))
 
-# loop through each value and extract binary raster
+# loop through each value and raster::extract binary raster
 binary_rasters <- list()
 for (value in unique_values) {
   binary_raster <- raw_landuses == value
@@ -334,10 +311,12 @@ for (value in unique_values) {
 binary_rasters$"43" 
 
 # now we sum up the following rasters:
-# settlements: 21, 22, 23
 # forest: 41, 42, 43
 # water: 11, 12, 13
 # basing on the known ecological preferences of steppe birds and for simplification purposes
+
+# in further analysis we can see high correlation between all settlements
+# so we join them all together
 
 elements_to_erase <- c('0','11', '12', '13', '41', '42', '43')
 binary_rasters_filtered <- binary_rasters[setdiff(names(binary_rasters), elements_to_erase)]
@@ -369,10 +348,29 @@ x <- rasterizeGeom(v, r, "length")
 plot(x)
 
 # transform to raster package format
-x <- raster(x)
+linear_infrastr <- raster(x) %>%
+  calc(fun = function(x) log10(x + 1)) %>%
+  mask_raster()
+
+# WATER STREAMS
+# stream length per pixel
+
+# load layers
+streams <- st_transform(rbind(st_read("spatial_data/streams/A_RiosCompletosv2.shp"),
+                                        st_read("spatial_data/streams/M_RiosCompletosv2.shp")), crs=4326)
+
+# transform to terra format
+v <- streams %>% vect() %>% as.lines()
+r <- rast(tas_2016)
+
+# calculate length
+x <- rasterizeGeom(v, r, "length")    
+plot(x)
+
 # log transform
-linear_infrastr <- calc(x, fun = function(x) log10(x + 1)) 
-linear_infrastr <- mask_raster(linear_infrastr)
+streams <- raster(x) %>%
+  calc(fun = function(x) log10(x + 1)) %>%
+  mask_raster()
 
 # resample to same extent and res than climate variables
 # bilinear for continuous and ngb for categorical
@@ -385,6 +383,7 @@ resampling <- function(x, method) {
 topo_variables <- lapply(topo_variables, function(x) resampling(x, method = 'bilinear'))
 land_variables <- lapply(land_variables, function(x) resampling(x, method = 'ngb'))
 linear_infrastr <- resampling(linear_infrastr, method='bilinear')
+streams <- resampling(streams, method='bilinear')
 
 # now we need to calculate environmental values in buffers of two different radius for each point and assign those values to each point
 # we will generate two different dataset and the bind: env values in a 15km buffer, and values in a 60km buffer
@@ -392,15 +391,15 @@ linear_infrastr <- resampling(linear_infrastr, method='bilinear')
 # for land uses we will calculate 
 
 env2016 <- c(tas_2016, tasmin_2016, tasmax_2016, tasseas_2016, pr_2016, prseas_2016,
-           topo_variables, linear_infrastr, land_variables)
+           topo_variables, linear_infrastr, streams, land_variables)
 env2017 <- c(tas_2017, tasmin_2017, tasmax_2017, tasseas_2017, pr_2017, prseas_2017,
-           topo_variables, linear_infrastr, land_variables)
+           topo_variables, linear_infrastr, streams, land_variables)
 env2018 <- c(tas_2018, tasmin_2018, tasmax_2018, tasseas_2018, pr_2018, prseas_2018,
-           topo_variables, linear_infrastr, land_variables)
+           topo_variables, linear_infrastr, streams, land_variables)
 envf1 <- c(tas_1, tasmin_1, tasmax_1, tasseas_1, pr_1, prseas_1,
-           topo_variables, liear_infrastr, land_variables)
+           topo_variables, linear_infrastr, streams, land_variables)
 envf5 <- c(tas_5, tasmin_5, tasmax_5, tasseas_5, pr_5, prseas_5,
-           topo_variables, linear_infrastr, land_variables)
+           topo_variables, linear_infrastr, streams, land_variables)
 
 # save and load these objects as rds
 saveRDS(env2016, "objects/env2016.rds")
@@ -415,96 +414,267 @@ saveRDS(envf5, "objects/envf5.rds")
 # envf5 <- readRDS("objects/envf5.rds")
 
 # also save a set of rasters to later explore spatial autocorrelation
-columnnames <- c('tmean', 'tmax', 'tmin', 'tseas', 'pr', 'prseas', 'elev', 'slope', 'linear_infrastr',
+columnnames <- c('tmean', 'tmax', 'tmin', 'tseas', 'pr', 'prseas', 'elev', 'slope', 'linear_infrastr', 'streams',
                  'forest', 'water', 'shrub', 'bare', 'for_shr_bare', 'settle_med', 'settle_low', 'for_shr_grass',
                  'for_shr_crop', 'for_shr_agric', 'mosaic_low', 'settle_high', 'crop_med', 'grass_low', 
                  'crop_high', 'grass_med', 'grass_high', 'mosaic_med', 'ext_perm_crop', 'crop_low', 'int_perm_crop', 
                  'mosaic_high')
-writeraster <- function(x, name) {
-  filename <- paste0('spatial_data/env_asciis/', name, '.asc')
+
+writeraster <- function(x, name, folder) {
+  filename <- paste0('spatial_data/',folder,'/', name, '.asc')
   writeRaster(x, filename, format='ascii', overwrite=TRUE)
 }
+
+dir.create('spatial_data/env2016')
+dir.create('spatial_data/env2017')
+dir.create('spatial_data/env2018')
+dir.create('spatial_data/envf1')
+dir.create('spatial_data/envf5')
+
 names(env2016) <- columnnames
-mapply(writeraster, env2016, names(env2016))
+names(env2017) <- columnnames
+names(env2018) <- columnnames
+names(envf1) <- columnnames
+names(envf5) <- columnnames
+
+mapply(writeraster, env2016, names(env2016), 'env2016')
+mapply(writeraster, env2017, names(env2017), 'env2017')
+mapply(writeraster, env2018, names(env2018), 'env2018')
+mapply(writeraster, envf1, names(envf1), 'envf1')
+mapply(writeraster, envf5, names(envf5), 'envf5')
 
 # convert to stack
 stack2016 <- stack(env2016)
 stack2017 <- stack(env2017)
 stack2018 <- stack(env2018)
 
+# no buffer (cell raster::extraction)
+# empty df
 env_pres <- data.frame(matrix(ncol=length(env2016), nrow=0))
 
-for (i in 1:nrow(allpoints)) {
-  
-  # generate buffer
-  buffer <- st_buffer(allpoints[i,], dist = 15000)
+for (i in 1:nrow(modeling_points)) {
   
   # extract values from each stack per year
-  if (allpoints$Ano_CS[i]==2016) {
-    values <- na.omit(as.data.frame(extract(stack2016, buffer)))
+  if (modeling_points$Ano_CS[i]==2016) {
+    values <- as.data.frame(raster::extract(stack2016, modeling_points[i,]))
   }
-  else if (allpoints$Ano_CS[i]==2017) {
-    values <- na.omit(as.data.frame(extract(stack2017, buffer)))
+  else if (modeling_points$Ano_CS[i]==2017) {
+    values <- as.data.frame(raster::extract(stack2017, modeling_points[i,]))
   }
-  else if (allpoints$Ano_CS[i]==2018) {
-    values <- na.omit(as.data.frame(extract(stack2018, buffer)))
+  else if (modeling_points$Ano_CS[i]==2018) {
+    values <- as.data.frame(raster::extract(stack2018, modeling_points[i,]))
+  }
+  
+  # bind
+  env_pres <- rbind(env_pres, values)
+}
+
+env_df_0 <- cbind(modeling_points, env_pres)
+colnames(env_df_0)[5:36] <- columnnames
+
+# find nearest cell to 333 (tarifa) and 304 (conil de la frontera), both 2016
+env2016_df <- na.omit(as.data.frame(stack2016, xy=T))
+# raster::extract coords
+coord_df_0 <- env_df_0[304, c("X", "Y")]
+# calculate abs diffs between x and y
+env2016_df$diff_x <- abs(env2016_df$x - coord_df_0$X)
+env2016_df$diff_y <- abs(env2016_df$y - coord_df_0$Y)
+# sum diffs
+env2016_df$total_diff <- env2016_df$diff_x + env2016_df$diff_y
+# find the lowest
+min_diff_index <- which.min(env2016_df$total_diff)
+# raster::extract row
+closest_row <- env2016_df[min_diff_index, ]
+# print
+print(closest_row)
+# assign
+env_df_0[304, 5:36] <- closest_row[,3:34]
+
+# raster::extract coords
+coord_df_0 <- env_df_0[333, c("X", "Y")]
+# calculate abs diffs between x and y
+env2016_df$diff_x <- abs(env2016_df$x - coord_df_0$X)
+env2016_df$diff_y <- abs(env2016_df$y - coord_df_0$Y)
+# sum diffs
+env2016_df$total_diff <- env2016_df$diff_x + env2016_df$diff_y
+# find the lowest
+min_diff_index <- which.min(env2016_df$total_diff)
+# raster::extract row
+closest_row <- env2016_df[min_diff_index, ]
+# print
+print(closest_row)
+# assign
+env_df_0[333, 5:36] <- closest_row[,3:34]
+
+# save
+write.csv2(st_drop_geometry(env_df_0), "data/fnaumanni_0km.csv", row.names=F)
+
+# 2km buffer (~12km2)
+# empty df
+env_pres <- data.frame(matrix(ncol=length(env2016), nrow=0))
+# here we also calculate shannon diversity index
+for (i in 1:nrow(modeling_points)) {
+  
+  # generate buffer
+  buffer <- st_buffer(modeling_points[i,], dist = 2000)
+  
+  # extract values from each stack per year
+  if (modeling_points$Ano_CS[i]==2016) {
+    values <- na.omit(as.data.frame(raster::extract(stack2016, buffer)))
+  }
+  else if (modeling_points$Ano_CS[i]==2017) {
+    values <- na.omit(as.data.frame(raster::extract(stack2017, buffer)))
+  }
+  else if (modeling_points$Ano_CS[i]==2018) {
+    values <- na.omit(as.data.frame(raster::extract(stack2018, buffer)))
   }
   
   # calculate mean for continuous and proportion for categorical
-  mean_cont <- colMeans(values[,1:9]) # continuous variables
-  mean_cat <- colSums(values[,10:31]) / nrow(values) # land uses (proportion of ones vs total)
-  mean_values <- c(mean_cont, mean_cat)
+  mean_cont <- colMeans(values[,1:10]) # continuous variables
+  landuses <- colSums(values[,11:32]) # presence of each land sue
+  total <- sum(landuses)
+  mean_cat <- landuses / total # proportion of ones vs total
+  # calculate shannon diversity index (H') for land uses
+  # max H' is log(22) = 3.091042
+  shannon <- -sum(mean_cat[mean_cat > 0] * log(mean_cat[mean_cat > 0]))
+  # bind
+  mean_values <- c(mean_cont, mean_cat, shannon)
   env_pres <- rbind(env_pres, mean_values)
 }
 
-env_df_15 <- cbind(allpoints, env_pres)
-colnames(env_df_15)[5:35] <- columnnames
-write.csv2(env_df_15, "data/fnaumanni_15km.csv", row.names=F)
+env_df_15 <- cbind(modeling_points, env_pres)
+colnames(env_df_15)[5:36] <- columnnames
+colnames(env_df_15)[37] <- 'shannon_index'
+# scale buffer results
+env_df_15[,14:36] <- scale(st_drop_geometry(env_df_15)[,14:36]) # zero variance variables get NA
+env_df_15[is.na(env_df_15)] <- 0
+# save
+write.csv2(st_drop_geometry(env_df_15), "data/fnaumanni_15km.csv", row.names=F)
 
-# repeat the latter process with a 60km buffer
-
+# 4.5km buffer (~64km2)
+# empty df
 env_pres <- data.frame(matrix(ncol=length(env2016), nrow=0))
 
-for (i in 1:nrow(allpoints)) {
-  buffer <- st_buffer(allpoints[i,], dist = 60000)
-  if (allpoints$Ano_CS[i]==2016) {
-    values <- na.omit(as.data.frame(extract(stack2016, buffer)))
+for (i in 1:nrow(modeling_points)) {
+  buffer <- st_buffer(modeling_points[i,], dist = 4500)
+  if (modeling_points$Ano_CS[i]==2016) {
+    values <- na.omit(as.data.frame(raster::extract(stack2016, buffer)))
   }
-  else if (allpoints$Ano_CS[i]==2017) {
-    values <- na.omit(as.data.frame(extract(stack2017, buffer)))
+  else if (modeling_points$Ano_CS[i]==2017) {
+    values <- na.omit(as.data.frame(raster::extract(stack2017, buffer)))
   }
-  else if (allpoints$Ano_CS[i]==2018) {
-    values <- na.omit(as.data.frame(extract(stack2018, buffer)))
+  else if (modeling_points$Ano_CS[i]==2018) {
+    values <- na.omit(as.data.frame(raster::extract(stack2018, buffer)))
   }
-  mean_cont <- colMeans(values[,1:9]) 
-  mean_cat <- colSums(values[,10:31]) / nrow(values) 
+  mean_cont <- colMeans(values[,1:10]) 
+  mean_cat <- colSums(values[,11:32]) / nrow(values) 
   mean_values <- c(mean_cont, mean_cat)
   env_pres <- rbind(env_pres, mean_values)
 }
 
-env_df_60 <- cbind(allpoints, env_pres)
-colnames(env_df_60)[5:35] <- columnnames
-write.csv2(env_df_60, "data/fnaumanni_60km.csv", row.names=F)
+env_df_60 <- cbind(modeling_points, env_pres)
+colnames(env_df_60)[5:36] <- columnnames
+# scale buffer results
+env_df_60[,14:36] <- scale(st_drop_geometry(env_df_60)[,14:36])
+env_df_60[is.na(env_df_60)] <- 0
+# save
+write.csv2(st_drop_geometry(env_df_60), "data/fnaumanni_60km.csv", row.names=F)
 
 # add suffix to col names in each dataset and join
-colnames(env_df_15)[5:35] <- paste(colnames(env_df_15)[5:35], "15", sep = "_")
-colnames(env_df_60)[5:35] <- paste(colnames(env_df_60)[5:35], "60", sep = "_")
-env_df <- cbind(env_df_15, env_df_60[,5:35])
-env_df <- env_df %>% select(-geometry.1) # duplicated geometry
+colnames(env_df_0)[5:36] <- paste(colnames(env_df_0)[5:36], "0", sep = "_")
+colnames(env_df_15)[5:36] <- paste(colnames(env_df_15)[5:36], "15", sep = "_")
+colnames(env_df_60)[5:36] <- paste(colnames(env_df_60)[5:36], "60", sep = "_")
+env_df <- cbind(env_df_0, env_df_15[,5:36], env_df_60[,5:36], env_df_15[,'shannon_index'])
+env_df <- env_df %>% dplyr::select(-geometry.1, -geometry.2, -geometry.3) %>% st_drop_geometry() # erase geometry
 
-# save datasets
+# add log column of response because highly imbalanced
+env_df$logTotal <- log(env_df$Total)
+
+# save complete database
 write.csv2(env_df, "data/fnaumanni_envdata.csv", row.names=F)
+
+# modelling observations versus shannon index
+# just to preeliminairly check if there's any relation
+plot(env_df$logTotal, env_df$shannon_index)
+model <- lm(logTotal ~ shannon_index, data = env_df)
+summary(model)
+# shannon index has no significant relation with abundance (p-value>0.1)
+# but still there's some kind of positive relation (more abundance on more heterogeneity)
+
+# we're calculating correlation between zero distance and both buffers to check if there's actually a difference
+# first with the smallest buffer
+cor_matrix <- cor(env_df[,5:68], use = "complete.obs")
+# to df
+cor_df <- as.data.frame(as.table(cor_matrix))
+# filter pairs with cor higher than 0.80
+high_corr <- subset(cor_df, abs(Freq) > 0.75 & abs(Freq) < 1)
+# order per the magnitude of the correlation
+high_corr <- high_corr[order(-abs(high_corr$Freq)), ]
+# print
+print(high_corr)
+# there's high corr between all climatic variables, elevation, and some landuses, including:
+# crop_high, crop_med, crop_low, grass_med (extense landuses in general)
+
+# now we're calculating corrs between zero distance and the largest buffer
+cor_matrix <- cor(env_df[,c(5:36, 69:100)], use = "complete.obs")
+cor_df <- as.data.frame(as.table(cor_matrix))
+high_corr <- subset(cor_df, abs(Freq) > 0.75 & abs(Freq) < 1)
+high_corr <- high_corr[order(-abs(high_corr$Freq)), ]
+print(high_corr)
+# same happens, high corr between all climatic variables and elevation, but no landuses!
+
+# basing on this, we're choosing only zero distance values for climatic variables and elevation
+# for crop_high, crop_med, crop_low and grass_med we're using zero distance and largest buffer 
+# for the rest of variables, we're using zero distance and selecting buffer size with the following criteria:
+
+# we're choosing 15km2 buffer when H' > mean(range(H')) and 60km2 when lower
+# (lower habitat area when diversity is high and viceversa)
+medium_shannon <- mean(range(env_df$shannon_index))
+mean_shannon <- mean(env_df$shannon_index)
+median_shannon <- median(env_df$shannon_index)
+# we're choosing median to cut obs in half
+# mean and median are very similar
+
+# add these variables to the final dataset
+shannon_env <- matrix(ncol=32, nrow=0)
+  
+# select buffer size per observation by shannon index
+for (i in 1:nrow(env_df)) {
+  if (env_df[i, 'shannon_index'] >= median_shannon) {
+    shannon_env <- rbind(shannon_env, as.numeric(st_drop_geometry(env_df_15[i,5:36])))
+  }
+  else if (env_df[i, 'shannon_index'] < median_shannon) {
+    shannon_env <- rbind(shannon_env, as.numeric(st_drop_geometry(env_df_60[i,5:36])))
+  }
+}
+
+#shannon_df <- as.data.frame(shannon_env)
+colnames(shannon_env) <- columnnames
+
+env_final <- cbind(env_df[,c(1:36,101:102)], # all zero, logtotal and shannon index
+                          shannon_env[,8:32]) # all but climatic and elev
+# replace landuses                          
+env_final$crop_high <- env_df$crop_high_60
+env_final$crop_med <- env_df$crop_med_60
+env_final$crop_low <- env_df$crop_low_60
+env_final$grass_med <- env_df$grass_med_60
+
+write.csv2(env_final, 'data/fnaumanni_byshannon.csv', row.names=F)
 
 # CORRELATION TEST
 
 rm(list = ls())
 
 # load env df
-env_df <- read.csv2("data/fnaumanni_envdata.csv")
+env_df <- read.csv2("data/fnaumanni_byshannon.csv")
+# all cols as numeric
+env_df[ , sapply(env_df, is.numeric)] <- lapply(env_df[ , sapply(env_df, is.numeric)], as.numeric)
 
 # select only env cols
-corrdata <- env_df[,5:66] # same variables but with different buffer size
-st_geometry(corrdata) <- NULL
+corrdata <- env_df[,c(5:37,39:63)] # same variables but with different buffer size
+# # some landuse_0 variables get 0 in every point so can't be computed and thus we erase
+# zero_cols <- sapply(corrdata, function(col) all(col == 0))
+# corrdata <- corrdata[, !zero_cols]
 
 # Calculate the correlation matrix
 cor_matrix <- cor(corrdata, use = "complete.obs")
@@ -514,7 +684,7 @@ png("results/correlation_plot.png", width = 3000, height = 2500)
 corrplot(cor_matrix, type = "full", method = "number")
 # finish burn
 dev.off()
-# Convertir la matriz de correlación en un data frame
+# to df
 cor_df <- as.data.frame(as.table(cor_matrix))
 # filter pairs with cor higher than 0.80
 high_corr <- subset(cor_df, abs(Freq) > 0.75 & abs(Freq) < 1)
@@ -522,36 +692,9 @@ high_corr <- subset(cor_df, abs(Freq) > 0.75 & abs(Freq) < 1)
 high_corr <- high_corr[order(-abs(high_corr$Freq)), ]
 # print
 print(high_corr)
-
-# high correlations in:
-vifdata <- corrdata[, -which(names(corrdata) %in% c('tmin_15', 'tmin_60', 'tmax_15', 'tmax_60', 'tseas_60', 'pr_60', 'tmean_60',
-                                                    'settle_high_60', 'slope_60', 'crop_med_60', 'int_perm_crop_60', 'settle_high_15',
-                                                    'elev_15', 'for_shr_grass_60', 'grass_low_60', 'mosaic_high_15', 'forest_60', 
-                                                    'linear_infrastr_60', 'bare_60', 'for_shr_crop_60'))]
-# aqui nos sale mucha correlacion entre settle_med y settle_high entonces igual estaria bien juntarlas para no perderlas
-
-### VIF ANALYSIS
-model <- lm(tmean_15 ~ ., data = vifdata)
-vifmodel <- as.data.frame(car::vif(model))
-vifmodel # crop_med_15 = 348
-vifmodel
-
-vifdata <- vifdata[, -which(names(vifdata) %in% c('crop_med_15'))]
-model <- lm(tmean_15 ~ ., data = vifdata)
-vifmodel <- as.data.frame(car::vif(model))
-vifmodel # prseas_60 = 10.4
-
-vifdata <- vifdata[, -which(names(vifdata) %in% c('prseas_60'))]
-model <- lm(tmean_15 ~ ., data = vifdata)
-vifmodel <- as.data.frame(car::vif(model))
-vifmodel # all under 10 (acceptable; Ringim et al., 2012)
-
 write.csv2(cor_matrix, "results/cor_matrix.csv", row.names=T)
-write.csv2(vifmodel, "results/vif.csv", row.names=T)
 
-# so the data we're using for modeling is the following
-final_envdf <- env_df[, -which(names(env_df) %in% c('tmin_15', 'tmin_60', 'tmax_15', 'tmax_60', 'tseas_60', 'pr_60', 'tmean_60',
-                                                    'settle_high_60', 'slope_60', 'crop_med_60', 'int_perm_crop_60', 'settle_high_15',
-                                                    'elev_15', 'for_shr_grass_60', 'grass_low_60', 'mosaic_high_15', 'forest_60', 
-                                                    'linear_infrastr_60', 'bare_60', 'for_shr_crop_60', 'crop_med_15', 'prseas_60'))]
-write.csv2(final_envdf, "data/modeling_data.csv", row.names=F)
+# we're erasing: tmin_0, tmax_0 and elev_0
+
+env_df <- env_df %>% select(-tmin_0, -tmax_0, -elev_0)
+write.csv2(env_df, "data/modeling_data.csv", row.names=F)
