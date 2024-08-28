@@ -46,8 +46,9 @@ presence_points <- raw_presence_points %>%
 
 # join obs per raster cells (sum up values per 1x1km cells)
 # load base raster
-base <- crop(raster('spatial_data/climate/present/CHELSA_tas_01_2016_V.2.1.tif'),
-             extent(spain))
+base <- raster('spatial_data/climate/present/CHELSA_tas_01_2016_V.2.1.tif') %>%
+  crop(extent(spain)) %>%
+  mask(spain)
 # assign unique value to each pixel
 base[] <- 1:ncell(base)
 # raster::extract centroid coordinates
@@ -472,10 +473,10 @@ for (i in 1:nrow(modeling_points)) {
 env_df_0 <- cbind(modeling_points, env_pres)
 colnames(env_df_0)[5:36] <- columnnames
 
-# find nearest cell to 333 (tarifa) and 304 (conil de la frontera), both 2016
+# find nearest cell to 1898 (tarifa) and 1884 (conil de la frontera), both 2016
 env2016_df <- na.omit(as.data.frame(stack2016, xy=T))
-# raster::extract coords
-coord_df_0 <- env_df_0[304, c("X", "Y")]
+# extract coords
+coord_df_0 <- env_df_0[1884, c("X", "Y")]
 # calculate abs diffs between x and y
 env2016_df$diff_x <- abs(env2016_df$x - coord_df_0$X)
 env2016_df$diff_y <- abs(env2016_df$y - coord_df_0$Y)
@@ -488,10 +489,10 @@ closest_row <- env2016_df[min_diff_index, ]
 # print
 print(closest_row)
 # assign
-env_df_0[304, 5:36] <- closest_row[,3:34]
+env_df_0[1884, 5:36] <- closest_row[,3:34]
 
-# raster::extract coords
-coord_df_0 <- env_df_0[333, c("X", "Y")]
+# extract coords
+coord_df_0 <- env_df_0[1898, c("X", "Y")]
 # calculate abs diffs between x and y
 env2016_df$diff_x <- abs(env2016_df$x - coord_df_0$X)
 env2016_df$diff_y <- abs(env2016_df$y - coord_df_0$Y)
@@ -504,7 +505,7 @@ closest_row <- env2016_df[min_diff_index, ]
 # print
 print(closest_row)
 # assign
-env_df_0[333, 5:36] <- closest_row[,3:34]
+env_df_0[1898, 5:36] <- closest_row[,3:34]
 
 # save
 write.csv2(st_drop_geometry(env_df_0), "data/fnaumanni_0km.csv", row.names=F)
