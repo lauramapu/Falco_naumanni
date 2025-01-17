@@ -373,11 +373,30 @@ streams <- raster(x) %>%
   calc(fun = function(x) log10(x + 1)) %>%
   mask_raster()
 
+# resource avalability: preys
+
+base <- tas_2016
+base[] <- 1:ncell(base) # unique values
+
+files <- list.files('spatial_data/preys', recursive=T, full.names = T, pattern='.shp')
+
+preys <- base
+preys[] <- 0
+
+for (file in files) {
+  shp <- st_read(file) %>% st_set_crs(25830) %>% st_transform(crs(base))
+  values <- na.omit(unlist(raster::extract(base, shp))) # extract pixels in each cell
+  binary <- calc(base, function(x) { ifelse(x %in% values, 1, 0) }) # generate binary raster
+  preys <- preys + binary # accumulate binaries in the raster
+}
+
+preys <- mask_raster(scale(preys))
+
 # resample to same extent and res than climate variables
 # bilinear for continuous and ngb for categorical
 
 resampling <- function(x, method) {
-  resampled <- projectRaster(x, tas_1, method = method)
+  resampled <- projectRaster(x, tas_2016, method = method)
   return(resampled)
 }
 
@@ -385,6 +404,7 @@ topo_variables <- lapply(topo_variables, function(x) resampling(x, method = 'bil
 land_variables <- lapply(land_variables, function(x) resampling(x, method = 'ngb'))
 linear_infrastr <- resampling(linear_infrastr, method='bilinear')
 streams <- resampling(streams, method='bilinear')
+preys <- resampling(preys, method='bilinear') # not categorical but integers
 
 # now we need to calculate environmental values in buffers of two different radius for each point and assign those values to each point
 # we will generate two different dataset and the bind: env values in a 15km buffer, and values in a 60km buffer
@@ -392,15 +412,15 @@ streams <- resampling(streams, method='bilinear')
 # for land uses we will calculate 
 
 env2016 <- c(tas_2016, tasmin_2016, tasmax_2016, tasseas_2016, pr_2016, prseas_2016,
-           topo_variables, linear_infrastr, streams, land_variables)
+           topo_variables, linear_infrastr, streams, preys, land_variables)
 env2017 <- c(tas_2017, tasmin_2017, tasmax_2017, tasseas_2017, pr_2017, prseas_2017,
-           topo_variables, linear_infrastr, streams, land_variables)
+           topo_variables, linear_infrastr, streams, preys, land_variables)
 env2018 <- c(tas_2018, tasmin_2018, tasmax_2018, tasseas_2018, pr_2018, prseas_2018,
-           topo_variables, linear_infrastr, streams, land_variables)
+           topo_variables, linear_infrastr, streams, preys, land_variables)
 envf1 <- c(tas_1, tasmin_1, tasmax_1, tasseas_1, pr_1, prseas_1,
-           topo_variables, linear_infrastr, streams, land_variables)
+           topo_variables, linear_infrastr, streams, preys, land_variables)
 envf5 <- c(tas_5, tasmin_5, tasmax_5, tasseas_5, pr_5, prseas_5,
-           topo_variables, linear_infrastr, streams, land_variables)
+           topo_variables, linear_infrastr, streams, preys, land_variables)
 
 # save and load these objects as rds
 saveRDS(env2016, "objects/env2016.rds")
@@ -415,7 +435,7 @@ saveRDS(envf5, "objects/envf5.rds")
 # envf5 <- readRDS("objects/envf5.rds")
 
 # also save a set of rasters to later explore spatial autocorrelation
-columnnames <- c('tmean', 'tmax', 'tmin', 'tseas', 'pr', 'prseas', 'elev', 'slope', 'linear_infrastr', 'streams',
+columnnames <- c('tmean', 'tmax', 'tmin', 'tseas', 'pr', 'prseas', 'elev', 'slope', 'linear_infrastr', 'streams', 'preys',
                  'forest', 'water', 'shrub', 'bare', 'for_shr_bare', 'settle_med', 'settle_low', 'for_shr_grass',
                  'for_shr_crop', 'for_shr_agric', 'mosaic_low', 'settle_high', 'crop_med', 'grass_low', 
                  'crop_high', 'grass_med', 'grass_high', 'mosaic_med', 'ext_perm_crop', 'crop_low', 'int_perm_crop', 
@@ -449,7 +469,7 @@ stack2016 <- stack(env2016)
 stack2017 <- stack(env2017)
 stack2018 <- stack(env2018)
 
-# no buffer (cell raster::extraction)
+# no buffer (cell extraction)
 # empty df
 env_pres <- data.frame(matrix(ncol=length(env2016), nrow=0))
 
@@ -471,7 +491,7 @@ for (i in 1:nrow(modeling_points)) {
 }
 
 env_df_0 <- cbind(modeling_points, env_pres)
-colnames(env_df_0)[5:36] <- columnnames
+colnames(env_df_0)[5:37] <- columnnames
 
 # find nearest cell to 1898 (tarifa) and 1884 (conil de la frontera), both 2016
 env2016_df <- na.omit(as.data.frame(stack2016, xy=T))
@@ -489,7 +509,7 @@ closest_row <- env2016_df[min_diff_index, ]
 # print
 print(closest_row)
 # assign
-env_df_0[1884, 5:36] <- closest_row[,3:34]
+env_df_0[1884, 5:37] <- closest_row[,3:35]
 
 # extract coords
 coord_df_0 <- env_df_0[1898, c("X", "Y")]
@@ -505,7 +525,7 @@ closest_row <- env2016_df[min_diff_index, ]
 # print
 print(closest_row)
 # assign
-env_df_0[1898, 5:36] <- closest_row[,3:34]
+env_df_0[1898, 5:37] <- closest_row[,3:35]
 
 # save
 write.csv2(st_drop_geometry(env_df_0), "data/fnaumanni_0km.csv", row.names=F)
@@ -531,8 +551,8 @@ for (i in 1:nrow(modeling_points)) {
   }
   
   # calculate mean for continuous and proportion for categorical
-  mean_cont <- colMeans(values[,1:10]) # continuous variables
-  landuses <- colSums(values[,11:32]) # presence of each land sue
+  mean_cont <- colMeans(values[,1:11]) # continuous variables
+  landuses <- colSums(values[,12:33]) # presence of each land sue
   total <- sum(landuses)
   mean_cat <- landuses / total # proportion of ones vs total
   # calculate shannon diversity index (H') for land uses
@@ -544,11 +564,11 @@ for (i in 1:nrow(modeling_points)) {
 }
 
 env_df_15 <- cbind(modeling_points, env_pres)
-colnames(env_df_15)[5:36] <- columnnames
-colnames(env_df_15)[37] <- 'shannon_index'
-# scale buffer results
-env_df_15[,14:36] <- scale(st_drop_geometry(env_df_15)[,14:36]) # zero variance variables get NA
-env_df_15[is.na(env_df_15)] <- 0
+colnames(env_df_15)[5:37] <- columnnames
+colnames(env_df_15)[38] <- 'shannon_index'
+# # scale landuses (many zeros)
+# env_df_15[,16:37] <- scale(st_drop_geometry(env_df_15)[,16:37]) # zero variance variables get NA
+# env_df_15[is.na(env_df_15)] <- 0
 # save
 write.csv2(st_drop_geometry(env_df_15), "data/fnaumanni_15km.csv", row.names=F)
 
@@ -567,44 +587,60 @@ for (i in 1:nrow(modeling_points)) {
   else if (modeling_points$Ano_CS[i]==2018) {
     values <- na.omit(as.data.frame(raster::extract(stack2018, buffer)))
   }
-  mean_cont <- colMeans(values[,1:10]) 
-  mean_cat <- colSums(values[,11:32]) / nrow(values) 
+  mean_cont <- colMeans(values[,1:11]) 
+  mean_cat <- colSums(values[,12:33]) / nrow(values) 
   mean_values <- c(mean_cont, mean_cat)
   env_pres <- rbind(env_pres, mean_values)
 }
 
 env_df_60 <- cbind(modeling_points, env_pres)
-colnames(env_df_60)[5:36] <- columnnames
-# scale buffer results
-env_df_60[,14:36] <- scale(st_drop_geometry(env_df_60)[,14:36])
-env_df_60[is.na(env_df_60)] <- 0
+colnames(env_df_60)[5:37] <- columnnames
+# # scale buffer results
+# env_df_60[,16:37] <- scale(st_drop_geometry(env_df_60)[,16:37])
+# env_df_60[is.na(env_df_60)] <- 0
 # save
 write.csv2(st_drop_geometry(env_df_60), "data/fnaumanni_60km.csv", row.names=F)
 
 # add suffix to col names in each dataset and join
-colnames(env_df_0)[5:36] <- paste(colnames(env_df_0)[5:36], "0", sep = "_")
-colnames(env_df_15)[5:36] <- paste(colnames(env_df_15)[5:36], "15", sep = "_")
-colnames(env_df_60)[5:36] <- paste(colnames(env_df_60)[5:36], "60", sep = "_")
-env_df <- cbind(env_df_0, env_df_15[,5:36], env_df_60[,5:36], env_df_15[,'shannon_index'])
+colnames(env_df_0)[5:37] <- paste(colnames(env_df_0)[5:37], "0", sep = "_")
+colnames(env_df_15)[5:37] <- paste(colnames(env_df_15)[5:37], "15", sep = "_")
+colnames(env_df_60)[5:37] <- paste(colnames(env_df_60)[5:37], "60", sep = "_")
+env_df <- cbind(env_df_0, env_df_15[,5:37], env_df_60[,5:37], env_df_15[,'shannon_index'])
 env_df <- env_df %>% dplyr::select(-geometry.1, -geometry.2, -geometry.3) %>% st_drop_geometry() # erase geometry
 
 # add log column of response because highly imbalanced
-env_df$logTotal <- log(env_df$Total)
+env_df$logTotal <- log10(env_df$Total)
 
 # save complete database
 write.csv2(env_df, "data/fnaumanni_envdata.csv", row.names=F)
 
+# plot histograms of all variables
+all_cols <- colnames(env_df[5:105])
+plot_list <- list()
+
+for (col in all_cols) {
+  p <- ggplot(env_df, aes_string(x = col)) +
+    geom_histogram(bins = 30, fill = "blue", color = "black", alpha = 0.7) +
+    theme_minimal() +
+    labs(title = col, x = col, y = "Frequency")
+  
+  plot_list[[col]] <- p
+}
+
+all_hists <- grid.arrange(grobs = plot_list, ncol = 11) 
+ggsave('data/all_variables_histograms.jpg', all_hists, width=30, height=15)
+
 # modelling observations versus shannon index
-# just to preeliminairly check if there's any relation
+# just to preeliminarly check if there's any relation
 plot(env_df$logTotal, env_df$shannon_index)
 model <- lm(logTotal ~ shannon_index, data = env_df)
 summary(model)
 # shannon index has no significant relation with abundance (p-value>0.1)
 # but still there's some kind of positive relation (more abundance on more heterogeneity)
 
-# we're calculating correlation between zero distance and both buffers to check if there's actually a difference
+# we're calculating correlation between zero distance and both buffers to check if there are significant corrs
 # first with the smallest buffer
-cor_matrix <- cor(env_df[,5:68], use = "complete.obs")
+cor_matrix <- cor(env_df[,5:70], use = "complete.obs")
 # to df
 cor_df <- as.data.frame(as.table(cor_matrix))
 # filter pairs with cor higher than 0.80
@@ -613,16 +649,16 @@ high_corr <- subset(cor_df, abs(Freq) > 0.75 & abs(Freq) < 1)
 high_corr <- high_corr[order(-abs(high_corr$Freq)), ]
 # print
 print(high_corr)
-# there's high corr between all climatic variables, elevation, and some landuses, including:
+# there's high corr between all climatic variables, elevation, preys, and some landuses, including:
 # crop_high, crop_med, crop_low, grass_med (extense landuses in general)
 
 # now we're calculating corrs between zero distance and the largest buffer
-cor_matrix <- cor(env_df[,c(5:36, 69:100)], use = "complete.obs")
+cor_matrix <- cor(env_df[,c(5:37, 71:103)], use = "complete.obs")
 cor_df <- as.data.frame(as.table(cor_matrix))
 high_corr <- subset(cor_df, abs(Freq) > 0.75 & abs(Freq) < 1)
 high_corr <- high_corr[order(-abs(high_corr$Freq)), ]
 print(high_corr)
-# same happens, high corr between all climatic variables and elevation, but no landuses!
+# same happens, high corr between all climatic variables, elevation and preys, but no landuses!
 
 # basing on this, we're choosing only zero distance values for climatic variables and elevation
 # for crop_high, crop_med, crop_low and grass_med we're using zero distance and largest buffer 
@@ -637,28 +673,23 @@ median_shannon <- median(env_df$shannon_index)
 # mean and median are very similar
 
 # add these variables to the final dataset
-shannon_env <- matrix(ncol=32, nrow=0)
+shannon_env <- matrix(ncol=length(env2016), nrow=0)
   
 # select buffer size per observation by shannon index
 for (i in 1:nrow(env_df)) {
   if (env_df[i, 'shannon_index'] >= median_shannon) {
-    shannon_env <- rbind(shannon_env, as.numeric(st_drop_geometry(env_df_15[i,5:36])))
+    shannon_env <- rbind(shannon_env, as.numeric(st_drop_geometry(env_df_15[i,5:37])))
   }
   else if (env_df[i, 'shannon_index'] < median_shannon) {
-    shannon_env <- rbind(shannon_env, as.numeric(st_drop_geometry(env_df_60[i,5:36])))
+    shannon_env <- rbind(shannon_env, as.numeric(st_drop_geometry(env_df_60[i,5:37])))
   }
 }
 
 #shannon_df <- as.data.frame(shannon_env)
 colnames(shannon_env) <- columnnames
 
-env_final <- cbind(env_df[,c(1:36,101:102)], # all zero, logtotal and shannon index
-                          shannon_env[,8:32]) # all but climatic and elev
-# replace landuses                          
-env_final$crop_high <- env_df$crop_high_60
-env_final$crop_med <- env_df$crop_med_60
-env_final$crop_low <- env_df$crop_low_60
-env_final$grass_med <- env_df$grass_med_60
+env_final <- cbind(env_df[, c('Total', 'logTotal', 'Ano_CS', 'X', 'Y', 'shannon_index')],
+                          shannon_env)
 
 write.csv2(env_final, 'data/fnaumanni_byshannon.csv', row.names=F)
 
@@ -672,7 +703,7 @@ env_df <- read.csv2("data/fnaumanni_byshannon.csv")
 env_df[ , sapply(env_df, is.numeric)] <- lapply(env_df[ , sapply(env_df, is.numeric)], as.numeric)
 
 # select only env cols
-corrdata <- env_df[,c(5:37,39:63)] # same variables but with different buffer size
+corrdata <- env_df[,5:39] # same variables but with different buffer size
 # # some landuse_0 variables get 0 in every point so can't be computed and thus we erase
 # zero_cols <- sapply(corrdata, function(col) all(col == 0))
 # corrdata <- corrdata[, !zero_cols]
@@ -695,7 +726,8 @@ high_corr <- high_corr[order(-abs(high_corr$Freq)), ]
 print(high_corr)
 write.csv2(cor_matrix, "results/cor_matrix.csv", row.names=T)
 
-# we're erasing: tmin_0, tmax_0 and elev_0
+# we're erasing: tmin, tmax and elev
+# and also mosaic_high and grass_high because zero std deviation
 
-env_df <- env_df %>% select(-tmin_0, -tmax_0, -elev_0)
+env_df <- env_df %>% select(-tmin, -tmax, -elev, -grass_high, -mosaic_high)
 write.csv2(env_df, "data/modeling_data.csv", row.names=F)

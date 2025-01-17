@@ -1,14 +1,7 @@
 # hyperparameter tuning
 
 rm(list=ls())
-
-library(ranger)
-library(caret)
-library(dplyr)
-library(tictoc)
-library(doParallel)
-library(plotly)
-library(ggplot2)
+source('scripts/utils.R')
 
 # hyperparameter tuning on parallel
 
@@ -21,25 +14,14 @@ library(ggplot2)
 n.cores <- parallel::detectCores() - 1
 my.cluster <- parallel::makeCluster(n.cores, type = "PSOCK")
 doParallel::registerDoParallel(cl = my.cluster)
-foreach::getDoParRegistered()
-foreach::getDoParWorkers()
-
-x <- foreach(
-  i = 1:10, 
-  .combine = 'c'
-) %dopar% {
-  sqrt(i)
-}
-x # check parallel execution is on
 
 dataset <- read.csv2("data/modeling_data.csv")
 dataset[ , sapply(dataset, is.numeric)] <- lapply(dataset[ , sapply(dataset, is.numeric)], as.numeric)
 
 # set grid to search hyperparameters
 # define ranges
-set.seed(123)
-grid <- expand.grid(mtry = 2:(ncol(dataset[,6:49])/2), # variables in each tree
-                    nodesize = seq(10, nrow(dataset[dataset$Total>0,]), by = 10)) # minimum size of terminal nodes
+grid <- expand.grid(mtry = 2:ncol(dplyr::select(dataset, -Total, -Ano_CS, -logTotal, -X, -Y)), # variables in each tree
+                    nodesize = c(1,2,3,4,5,6,7,8,9, seq(10, nrow(dataset), by = 10))) # minimum size of terminal nodes
 write.csv2(grid, "data/grid_hyperpar.csv", row.names=F)
 # grid <- read.csv2("data/grid_hyperpar.csv")
 
@@ -49,7 +31,7 @@ metrics <- foreach(i = 1:nrow(grid),
                    .packages=c("ranger", "dplyr", "caret"),
                    .combine='rbind') %:% # iterations through hyperpar combinations
   
-           foreach(j = 1:5,
+           foreach(j = 1:10,
            .combine='rbind') %dopar% { # iterations through random cv folds (5)
             
             # set unique seed for each fold
@@ -60,67 +42,40 @@ metrics <- foreach(i = 1:nrow(grid),
             train <- dataset[index, ]
             test <- dataset[-index, ]  
             
-            # calculate case weights in training
-            # class frecs
-            freq_zero <- sum(train$Total == 0)
-            freq_nonzero <- sum(train$Total != 0)
-            # calculate if frec zero > non_zero
-            if (freq_zero > freq_nonzero) {
-              # inversaly proportional weights to the frecs
-              weight_zero <- 1 / freq_zero
-              weight_nonzero <- 1 / freq_nonzero
-              
-              # assign frecs to each obs
-              train <- train %>%
-                mutate(case_weight = ifelse(response == 0, weight_zero, weight_nonzero))
-              
-              # normalize weights to sum up 1
-              train$case_weight <- train$case_weight / sum(train$case_weight)
-            } else {
-              # assign same weight to all obs
-              train <- train %>%
-                mutate(case_weight = 1 / n())
-            }
-            
             # train the model
-            model <- ranger(Total ~ . -X -Y -Ano_CS -case_weight,
+            model <- ranger(logTotal ~ . -Total -X -Y -Ano_CS,
                             data = train,
-                            case.weights = train$case_weight,
                             mtry = grid[i,1],
                             num.tree = 1000,
                             min.node.size = grid[i,2],
                             importance='none')
             
-            # generate training predictions (only select probs of presence)
+            # generate training predictions 
             preds <- predict(model, data=train)
             train$pred <- preds[[1]]
             
             # calculate metrics (caret)
-            mae_train <- MAE(preds[[1]], train$Total)
-            mse_train <- mean((preds[[1]] - train$Total)^2)
-            rmse_train <- RMSE(preds[[1]], train$Total)
-            Rsq_train <- 1 - (sum((train$Total - preds[[1]])^2) / sum((train$Total - mean(train$Total))^2))
+            mae_train <- MAE(preds[[1]], train$logTotal)
+            mse_train <- mean((preds[[1]] - train$logTotal)^2)
+            rmse_train <- RMSE(pred = preds[[1]], obs = train$logTotal)
+            Rsq_train <- 1 - (sum((train$logTotal - preds[[1]])^2) / sum((train$logTotal - mean(train$logTotal))^2))
             
-            # generate testing predictions and binaries from maxSSS
+            # generate testing predictions 
             preds <- predict(model, data=test)
             test$pred <- preds[[1]]
             
             # calculate metrics (caret)
-            mae_test <- MAE(preds[[1]], test$Total)
-            mse_test <- mean((preds[[1]] - test$Total)^2)
-            rmse_test <- RMSE(preds[[1]], test$Total)
-            Rsq_test <- 1 - (sum((test$Total - preds[[1]])^2) / sum((test$Total - mean(test$Total))^2))
+            mae_test <- MAE(preds[[1]], test$logTotal)
+            mse_test <- mean((preds[[1]] - test$logTotal)^2)
+            rmse_test <- RMSE(pred = preds[[1]], obs = test$logTotal)
+            Rsq_test <- 1 - (sum((test$logTotal - preds[[1]])^2) / sum((test$logTotal - mean(test$logTotal))^2))
             
             # store all the relevant values in the metrics dataframe
-            # column_names <- c('mtry', 'ntree', 'nodesize','thr_value',
-            # 'Sens_train', 'F1_train','B.Accuracy_train','TSS_train','AUC_train',
-            # 'Sens_test', 'F1_test', 'B.Accuracy_test','TSS_test','AUC_test')
-            
             metrics <- c(i, j, grid[i,1], grid[i,2], mae_train, mse_train, rmse_train, Rsq_train,
                          mae_test, mse_test, rmse_test, Rsq_test)
             return(metrics)
           }
-toc() # 5691.92 sec
+toc() # 12077.67 sec
 
 # assign col names
 metrics <- as.data.frame(metrics)
@@ -159,18 +114,20 @@ p <- ggplot(metrics_mean, aes(x = sum, y = Rsquared_diff)) +
 p_interactive <- ggplotly(p, tooltip = "text")
 p_interactive
 
-plot(metrics_mean$mtry, metrics_mean$Rsquared_test) # better the lower
-plot(metrics_mean$nodesize, metrics_mean$Rsquared_test) # same
+plot(metrics_mean$mtry, metrics_mean$Rsquared_test) # better the higher
+plot(metrics_mean$nodesize, metrics_mean$Rsquared_test) # lower
 
-# since results are overal very good we're just choosing the comb with highest Rsq in test
+plot(metrics_mean$Rsquared_train, metrics_mean$Rsquared_test) # better the higher
+
+# since results are overall very good we're just choosing the comb with highest Rsq in test
 # generalization in this comb is very good (loss of 0.02)
 metrics_mean[which.max(metrics_mean$Rsquared_test),]
-# mtry = 22; nodesize = 10
-# this comb maximizes metrics and minimizes difference between train/test also
+# mtry = 4; nodesize = 20
+# still Rsq test is quite low (~0.1)
 
 # now we need to check 1000 trees are actually enough
 
-ntrees <- seq(500, 10000, by = 500)
+ntrees <- seq(1000, 10000, by = 500)
 
 # run models iterating through each hyperpar combination
 tic("ntrees tuning")
@@ -178,74 +135,51 @@ metrics <- foreach(i = 1:length(ntrees),
                    .packages=c("ranger", "dplyr", "caret"),
                    .combine='rbind') %:% # iterations through trees number
   
-  foreach(j = 1:5,
-          .combine='rbind') %dopar% { # iterations through random cv folds (5)
+  foreach(j = 1:10,
+          .combine='rbind') %dopar% { # iterations through random cv folds (10)
             
             # set unique seed for each fold
             set.seed(j**2)
             
             # use caret to randomly split train/test data (80-20)
-            index <- createDataPartition(dataset$Total, p = 0.8, list = FALSE)
+            index <- createDataPartition(dataset$logTotal, p = 0.8, list = FALSE)
             train <- dataset[index, ]
             test <- dataset[-index, ]  
             
-            # calculate case weights in training
-            # class frecs
-            freq_zero <- sum(train$Total == 0)
-            freq_nonzero <- sum(train$Total != 0)
-            # calculate if frec zero > non_zero
-            if (freq_zero > freq_nonzero) {
-              # inversaly proportional weights to the frecs
-              weight_zero <- 1 / freq_zero
-              weight_nonzero <- 1 / freq_nonzero
-              
-              # assign frecs to each obs
-              train <- train %>%
-                mutate(case_weight = ifelse(response == 0, weight_zero, weight_nonzero))
-              
-              # normalize weights to sum up 1
-              train$case_weight <- train$case_weight / sum(train$case_weight)
-            } else {
-              # assign same weight to all obs
-              train <- train %>%
-                mutate(case_weight = 1 / n())
-            }
-            
             # train the model
-            model <- ranger(Total ~ . -X -Y -Ano_CS -case_weight,
+            model <- ranger(logTotal ~ . -X -Y -Ano_CS -Total,
                             data = train,
-                            case.weights = train$case_weight,
                             num.tree = ntrees[[i]],
                             mtry = metrics_mean$mtry[which.max(metrics_mean$Rsquared_test)],
                             min.node.size = metrics_mean$nodesize[which.max(metrics_mean$Rsquared_test)],
                             importance='none')
             
-            # generate training predictions (only select probs of presence)
+            # generate training predictions 
             preds <- predict(model, data=train)
             train$pred <- preds[[1]]
             
             # calculate metrics (caret)
-            mae_train <- MAE(preds[[1]], train$Total)
-            mse_train <- mean((preds[[1]] - train$Total)^2)
-            rmse_train <- RMSE(preds[[1]], train$Total)
-            Rsq_train <- 1 - (sum((train$Total - preds[[1]])^2) / sum((train$Total - mean(train$Total))^2))
+            mae_train <- MAE(preds[[1]], train$logTotal)
+            mse_train <- mean((preds[[1]] - train$logTotal)^2)
+            rmse_train <- RMSE(pred = preds[[1]], obs = train$logTotal)
+            Rsq_train <- 1 - (sum((train$logTotal - preds[[1]])^2) / sum((train$logTotal - mean(train$logTotal))^2))
             
-            # generate testing predictions and binaries from maxSSS
+            # generate testing predictions a
             preds <- predict(model, data=test)
             test$pred <- preds[[1]]
             
             # calculate metrics (caret)
-            mae_test <- MAE(preds[[1]], test$Total)
-            mse_test <- mean((preds[[1]] - test$Total)^2)
-            rmse_test <- RMSE(preds[[1]], test$Total)
-            Rsq_test <- 1 - (sum((test$Total - preds[[1]])^2) / sum((test$Total - mean(test$Total))^2))
+            mae_test <- MAE(preds[[1]], test$logTotal)
+            mse_test <- mean((preds[[1]] - test$logTotal)^2)
+            rmse_test <- RMSE(pred = preds[[1]], obs = test$logTotal)
+            Rsq_test <- 1 - (sum((test$logTotal - preds[[1]])^2) / sum((test$logTotal - mean(test$logTotal))^2))
             
             # store all the relevant values in the metrics dataframe
             metrics <- c(ntrees[i], j, mae_train, mse_train, rmse_train, Rsq_train,
                          mae_test, mse_test, rmse_test, Rsq_test)
             return(metrics)
           }
-toc() # 486.96 sec
+toc() # 341.59 sec
 
 # assign col names
 metrics <- as.data.frame(metrics)
@@ -260,7 +194,8 @@ metrics_mean <- metrics %>%
 write.csv2(metrics_mean, "results/hyperparameters_ntrees_mean.csv", row.names = F)
 
 plot(metrics_mean$ntrees, metrics_mean$Rsquared_test)
+metrics_mean[which.max(metrics_mean$Rsquared_test),]
 
-# highest Rsq in test at 1500 trees
+# highest Rsq in test at 1000 trees
 
 registerDoSEQ()

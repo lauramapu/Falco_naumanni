@@ -18,7 +18,6 @@ library(grDevices) # to create custom color palette
 library(biscale)
 library(terra)
 library(purrr)
-library(randomForest)
 library(caret)
 library(pdp)
 library(dplyr)
@@ -29,6 +28,11 @@ library(tidyr)
 library(modEvA) # boyce index
 library(car) # vif
 library(spatialRF) # spatial autocorrelation tests
+library(corrplot)
+library(ranger)
+library(plotly)
+library(doParallel)
+library(landscapemetrics)
 
 # function to list and cite all the above packages
 versionandcitation <- function() {
@@ -78,6 +82,14 @@ getpeninsularspain <- function() {
   spain <- provinces %>%
     dissolve(field='campo') %>%
     st_transform(crs=4326)
+}
+
+# crop+mask function for all variables
+mask_raster <- function(raster_layer) {
+  maskk <- st_transform(spain, st_crs(raster_layer))
+  cropped <- raster::crop(raster_layer, extent(maskk))
+  masked <- raster::mask(cropped, maskk)
+  return(masked)
 }
 
 # function to construct bivariated maps
@@ -193,4 +205,127 @@ custom_bipal <- function(min.xy, max.y, max.x, max.xy, dim) {
   names(color_vector) <- custom_pal_names
   
   return(color_vector)
+}
+
+# function to train ranger model with 10 folds and random CV
+train_rf <- function(data, 
+                     response_var, 
+                     predictors, 
+                     n_folds = 10, 
+                     ntree,
+                     mtry,            
+                     nodesize) {   
+  
+  # paralellize
+  cl <- makeCluster(detectCores() - 1) 
+  registerDoParallel(cl)
+  
+  # construct formula
+  formula <- as.formula(paste(response_var, "~", paste(predictors, collapse = " + ")))
+  
+  # folds loop
+  results <- foreach(i = 1:n_folds,
+                     .packages = c("ranger", "dplyr", "caret"),
+                     .combine = 'c', 
+                     .multicombine = TRUE, 
+                     .inorder = TRUE,
+                     .verbose = TRUE) %dopar% {
+                       
+                       # set unique seed for each fold
+                       set.seed(i)
+                       
+                       # use caret to randomly split train/test data (80-20)
+                       index <- createDataPartition(data[[response_var]], p = 0.8, list = FALSE)
+                       train <- data[index, ]
+                       test <- data[-index, ]
+                       
+                       # train the model
+                       model <- ranger(formula = formula,
+                                       data = train,
+                                       mtry = mtry,
+                                       min.node.size = nodesize,
+                                       ntree = ntree, 
+                                       importance='none')
+                       
+                       # generate training predictions
+                       preds_train <- predict(model, data = train)
+                       train$pred <- preds_train$predictions
+                       
+                       # calculate training metrics
+                       mae_train <- MAE(preds_train$predictions, train[[response_var]])
+                       mse_train <- mean((preds_train$predictions - train[[response_var]])^2)
+                       rmse_train <- RMSE(pred = preds_train$predictions, obs = train[[response_var]])
+                       Rsq_train <- 1 - (sum((train[[response_var]] - preds_train$predictions)^2) / 
+                                           sum((train[[response_var]] - mean(train[[response_var]]))^2))
+                       
+                       # generate testing predictions
+                       preds_test <- predict(model, data = test)
+                       test$pred <- preds_test$predictions
+                       
+                       # calculate testing metrics
+                       mae_test <- MAE(preds_test$predictions, test[[response_var]])
+                       mse_test <- mean((preds_test$predictions - test[[response_var]])^2)
+                       rmse_test <- RMSE(pred = preds_test$predictions, obs = test[[response_var]])
+                       Rsq_test <- 1 - (sum((test[[response_var]] - preds_test$predictions)^2) / 
+                                          sum((test[[response_var]] - mean(test[[response_var]]))^2))
+                       
+                       # Return results as a list
+                       list(
+                         metrics = c(fold = i, mae_train, mse_train, rmse_train, Rsq_train,
+                                     mae_test, mse_test, rmse_test, Rsq_test),
+                         train = train[[response_var]], preds_train = preds_train$predictions,
+                         test = test[[response_var]], preds_test = preds_test$predictions
+                       )
+                     }
+  
+  stopCluster(cl)
+  return(results)
+}
+
+# function to print results (mean metrics and preds~obs plots)
+print_results <- function(results) {
+  
+  # extract metrics in sequence (5 elements per fold: metrics, train, preds_train, test, preds_test)
+  metrics_list <- results[seq(1, length(results), by = 5)]
+  
+  # to df
+  metrics_df <- do.call(rbind, metrics_list)
+  
+  # assign column names
+  columnnames <- c("fold", "mae_train", "mse_train", "rmse_train", "Rsq_train", 
+                   "mae_test", "mse_test", "rmse_test", "Rsq_test")
+  colnames(metrics_df) <- columnnames
+  
+  # calculate average
+  metrics_means <- colMeans(metrics_df)
+  
+  # print
+  print(metrics_means[-1])
+  
+  # extract observations and predicted per fold for both train and test
+  train_list <- results[seq(2, length(results), by = 5)]  
+  preds_train_list <- results[seq(3, length(results), by = 5)] 
+  
+  test_list <- results[seq(4, length(results), by = 5)]  
+  preds_test_list <- results[seq(5, length(results), by = 5)]  
+  
+  # plots list (x = preds, y = obs)
+  plot_list_train <- lapply(1:10, function(i) {
+    ggplot(data.frame(real = train_list[[i]], pred = preds_train_list[[i]]), aes(x = pred, y = real)) +
+      geom_point() +
+      geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+      labs(title = paste("Fold", i, "- Train"), x = "Predicted", y = "Real") +
+      theme_minimal()
+  })
+  
+  plot_list_test <- lapply(1:10, function(i) {
+    ggplot(data.frame(real = test_list[[i]], pred = preds_test_list[[i]]), aes(x = pred, y = real)) +
+      geom_point() +
+      geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "blue") +
+      labs(title = paste("Fold", i, "- Test"), x = "Predicted", y = "Real") +
+      theme_minimal()
+  })
+  
+  # combine
+  grid.arrange(grobs = c(plot_list_train, plot_list_test), ncol = 5)
 }

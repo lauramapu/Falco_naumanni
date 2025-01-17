@@ -1,33 +1,26 @@
+
 # fitting process with spatialrf (Blas Benito)
 
 rm(list=ls())
-
-library(spatialRF)
-library(dplyr)
+source('scripts/utils.R')
 
 # load data
-dataset <- read.csv2("data/modeling_data.csv")
+dataset <- read.csv2("data/modeling_data_v2.csv")
 dataset <- dataset %>%
   rename(x=X, y=Y)
 dataset[ , sapply(dataset, is.numeric)] <- lapply(dataset[ , sapply(dataset, is.numeric)], as.numeric)
 
-# # vamos a hacer un apaño cutre para no tener coordenadas duplicadas hasta que sepa que hacer con los duplicados
-# # sumamos 0.001 a la x y la y de las coords duplicadas
-# dataset <- dataset %>%
-#   group_by(x, y) %>%
-#   mutate(
-#     row_id = row_number(),  # Crear un identificador de fila para cada grupo de duplicados
-#     x = if_else(row_id == 1, x, x + 0.1 * (row_id - 1)),  # Sumar 0.001 por cada duplicado adicional
-#     y = if_else(row_id == 1, y, y + 0.1 * (row_id - 1))
-#   ) %>%
-#   ungroup() %>%
-#   dplyr::select(-row_id) # Eliminar la columna de identificador de fila
-  
+# calculate std dev of each column
+std_devs <- sapply(dataset, sd, na.rm = TRUE)
+# find the ones with zero std dev (no change)
+cols_to_remove <- names(std_devs[std_devs == 0])
+dataset <- dataset %>% dplyr::select(-all_of(cols_to_remove))
+
 any(duplicated(dataset[,c('x','y')])) # check
 
 # names of the response variable and the predictors
-dependent.variable.name <- "logTotal"
-predictor.variable.names <- colnames(dataset)[6:49]
+dependent.variable.name <- "Total"
+predictor.variable.names <- colnames(dplyr::select(dataset, -x, -y, -Total, -logTotal, -Ano_CS))
 
 # coordinates of the cases
 xy <- dataset[, c("x", "y")]
@@ -37,7 +30,7 @@ distance.matrix <- as.matrix(dist(xy))
 
 # distance thresholds (same units as distance_matrix)
 # same units as projection!!!!! (degrees)
-distance.thresholds <- c(0.05, 0.1, 0.11, 0.12, 0.13, 0.14, 0.15, 0.2, 0.3, 0.4, 0.5, 1)
+distance.thresholds <- c(0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 1)
 
 # random seed for reproducibility
 random.seed <- 21
@@ -100,6 +93,11 @@ spatialRF::plot_moran(
 )
 # max dist and min p-value at ~15km (0.10 degrees)
 
+mem <- mem_multithreshold(
+  distance.matrix = distance.matrix,
+  distance.thresholds = distance.thresholds,
+  max.spatial.predictors = 10)
+
 model.spatial <- spatialRF::rf_spatial(
   model = model.non.spatial,
   method = "mem.moran.sequential", #default method
@@ -126,3 +124,7 @@ kableExtra::kbl(
   kableExtra::kable_paper("hover", full_width = F)
 
 # since there's no spatial correlation we continue with no spatial predictors
+
+spatial.predictors <- get_spatial_predictors(model.spatial)
+colnames(spatial.predictors) <- c('SP1', 'SP2', 'SP3', 'SP4', 'SP5', 'SP6', 'SP7', 'SP8', 'SP9', 'SP10')
+dataset <- cbind()
